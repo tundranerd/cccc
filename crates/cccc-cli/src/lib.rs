@@ -173,7 +173,11 @@ pub fn run() -> i32 {
     // Which extensions to collect: a global `--ext` filter if one was given,
     // otherwise the union of the active languages' (possibly overridden)
     // extensions. Either way each file is dispatched by its own extension.
-    let exts: Vec<String> = if global_ext.is_empty() {
+    // An explicit `--ext` filter also disables shebang discovery: the user
+    // asked for a specific extension set, so probing extensionless files would
+    // contradict it.
+    let shebangs = global_ext.is_empty();
+    let exts: Vec<String> = if shebangs {
         dispatch.keys().cloned().collect()
     } else {
         for ext in &global_ext {
@@ -224,7 +228,16 @@ pub fn run() -> i32 {
         cache::LazyGitIndex::new(root)
     });
 
-    let files = walk::collect_files(&cli.paths, &exts, no_ignore, exclude.as_ref(), jobs);
+    // Extensionless scripts are discovered by their shebang unless the user
+    // pinned an explicit `--ext` filter (see above).
+    let files = walk::collect_files(
+        &cli.paths,
+        &exts,
+        shebangs,
+        no_ignore,
+        exclude.as_ref(),
+        jobs,
+    );
     if files.is_empty() {
         eprintln!("cccc: no matching files found");
         return 0;
@@ -260,12 +273,12 @@ pub fn run() -> i32 {
                 Some(pool) => pool.install(|| {
                     files
                         .par_iter()
-                        .map(|p| check_cached(c, &dispatch, p, git))
+                        .map(|p| check_cached(c, &dispatch, &languages, p, git))
                         .collect()
                 }),
                 None => files
                     .iter()
-                    .map(|p| check_cached(c, &dispatch, p, git))
+                    .map(|p| check_cached(c, &dispatch, &languages, p, git))
                     .collect(),
             };
             let mut hits = Vec::new();
@@ -291,12 +304,12 @@ pub fn run() -> i32 {
         Some(pool) => pool.install(|| {
             to_analyze
                 .par_iter()
-                .filter_map(|p| read_and_analyze(&dispatch, p, want_sig))
+                .filter_map(|p| read_and_analyze(&dispatch, &languages, p, want_sig))
                 .collect()
         }),
         None => to_analyze
             .iter()
-            .filter_map(|p| read_and_analyze(&dispatch, p, want_sig))
+            .filter_map(|p| read_and_analyze(&dispatch, &languages, p, want_sig))
             .collect(),
     };
     entries.extend(cached_entries);
@@ -316,7 +329,7 @@ pub fn run() -> i32 {
     {
         let store = || {
             cache::store(cache_file, &entries, &|p| {
-                lang_for(&dispatch, p).map(|l| l.name)
+                language_for(&dispatch, &languages, p).map(|l| l.name)
             })
         };
         match &pool {
@@ -431,9 +444,10 @@ fn split_exts(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Read a file and analyze it with the language matching its extension,
-/// reporting (but not failing on) read errors. A file whose extension no active
-/// language claims is skipped silently (it was only collected via `--ext`).
+/// Read a file and analyze it with the language that handles it, reporting
+/// (but not failing on) read errors. Language selection is by extension first,
+/// falling back to the file's shebang for extensionless scripts (see
+/// [`language_for`]); a file no active language claims is skipped silently.
 ///
 /// With `want_sig`, also produce the file's cache signature, hashed from the
 /// bytes already in memory. The mtime is stat'ed *before* the read: if the
@@ -442,10 +456,11 @@ fn split_exts(s: &str) -> Vec<String> {
 /// mtime masking older content) can't happen.
 fn read_and_analyze(
     dispatch: &HashMap<String, &'static lang::Language>,
+    languages: &[&'static lang::Language],
     path: &Path,
     want_sig: bool,
 ) -> Option<(FileReport, Option<cache::Sig>)> {
-    let language = lang_for(dispatch, path)?;
+    let language = language_for(dispatch, languages, path)?;
     let mtime = if want_sig {
         cache::mtime_ns(path)
     } else {
@@ -474,14 +489,44 @@ fn lang_for(
         .copied()
 }
 
+/// The active language that handles `path`: by extension when one matches, else
+/// by the file's `#!` interpreter line. The shebang fallback is what makes an
+/// extensionless script analyzable; it is consulted only when no extension
+/// matches, so an explicit extension always wins. The detected language must be
+/// in `languages`, so `--lang`/`--exclude-lang` filter shebang detection too.
+fn language_for(
+    dispatch: &HashMap<String, &'static lang::Language>,
+    languages: &[&'static lang::Language],
+    path: &Path,
+) -> Option<&'static lang::Language> {
+    if let Some(language) = lang_for(dispatch, path) {
+        return Some(language);
+    }
+    let name = lang::language_from_shebang(&read_first_line(path)?)?;
+    languages.iter().copied().find(|l| l.name == name)
+}
+
+/// The first line of `path`, for shebang detection. Caps the read at 512 bytes
+/// and tolerates non-UTF-8 (lossily) so probing an arbitrary file can never
+/// fail or allocate the whole file.
+fn read_first_line(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = [0u8; 512];
+    let n = file.read(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf[..n]);
+    Some(text.lines().next().unwrap_or("").to_string())
+}
+
 /// The cache hit for `path` — or `path` itself, as a miss to analyze.
 fn check_cached<'a>(
     cache: &cache::Cache,
     dispatch: &HashMap<String, &'static lang::Language>,
+    languages: &[&'static lang::Language],
     path: &'a std::path::PathBuf,
     git: Option<&cache::LazyGitIndex>,
 ) -> Result<cache::Hit, &'a std::path::PathBuf> {
-    match lang_for(dispatch, path).and_then(|l| cache.lookup(path, l.name, git)) {
+    match language_for(dispatch, languages, path).and_then(|l| cache.lookup(path, l.name, git)) {
         Some(hit) => Ok(hit),
         None => Err(path),
     }

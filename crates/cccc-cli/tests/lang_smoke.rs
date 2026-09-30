@@ -125,3 +125,13 @@ fn dart_fixture_dispatches() {
 fn scala_fixture_dispatches() {
     assert_sum_of_primes("sample.scala", "sumOfPrimes");
 }
+
+#[test]
+fn shell_fixture_dispatches() {
+    assert_sum_of_primes("sample.sh", "sum_of_primes");
+}
+
+#[test]
+fn zsh_fixture_dispatches() {
+    assert_sum_of_primes("sample.zsh", "sum_of_primes");
+}

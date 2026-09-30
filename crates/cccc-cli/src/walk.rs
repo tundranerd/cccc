@@ -14,6 +14,19 @@ fn has_ext(path: &Path, exts: &[String]) -> bool {
         .unwrap_or(false)
 }
 
+/// True when `path` begins with `#!` (a shebang). Reads only the leading two
+/// bytes, so probing an extensionless candidate is cheap. The executable bit is
+/// deliberately ignored: non-executable scripts are common (sourced, or invoked
+/// via an interpreter), and the bit is meaningless on Windows.
+fn has_shebang(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 2];
+    file.read_exact(&mut head).is_ok() && &head == b"#!"
+}
+
 /// Compile `--exclude` glob patterns into a single matcher.
 ///
 /// Returns `Ok(None)` when no patterns are given (the common case, so callers
@@ -53,13 +66,17 @@ fn is_excluded(path: &Path, base: Option<&Path>, exclude: Option<&GlobSet>) -> b
 
 /// Collect matching files from `paths`. Explicit file arguments are included
 /// regardless of extension; directories are walked (respecting ignore files
-/// unless `no_ignore`) and filtered by `exts`. `node_modules` is always skipped.
+/// unless `no_ignore`) and filtered by `exts`. When `shebangs` is set, an
+/// extensionless regular file is also collected if it starts with `#!` — the
+/// portable signal that it is a script — so extensionless scripts are analyzed
+/// without an extension to route them. `node_modules` is always skipped.
 /// Any file matching `exclude` is dropped, whether named explicitly or found by
 /// walking. Directories are walked with up to `threads` workers; the returned
 /// order is unspecified (reports are sorted by path before rendering).
 pub fn collect_files(
     paths: &[PathBuf],
     exts: &[String],
+    shebangs: bool,
     no_ignore: bool,
     exclude: Option<&GlobSet>,
     threads: usize,
@@ -98,7 +115,9 @@ pub fn collect_files(
                 // would stat every entry a second time.
                 if entry.file_type().is_some_and(|ft| ft.is_file()) {
                     let path = entry.path();
-                    if has_ext(path, exts) && !is_excluded(path, Some(root), exclude) {
+                    let matches = has_ext(path, exts)
+                        || (shebangs && path.extension().is_none() && has_shebang(path));
+                    if matches && !is_excluded(path, Some(root), exclude) {
                         collected.lock().unwrap().push(path.to_path_buf());
                     }
                 }
@@ -159,7 +178,14 @@ mod tests {
         fs::write(dir.join("sub/b.ts"), "").unwrap();
         fs::write(dir.join("sub/skip.txt"), "").unwrap();
 
-        let files = collect_files(std::slice::from_ref(&dir), &ts_exts(), false, None, 8);
+        let files = collect_files(
+            std::slice::from_ref(&dir),
+            &ts_exts(),
+            false,
+            false,
+            None,
+            8,
+        );
         assert_eq!(sorted_names(&files), ["a.ts", "b.ts"]);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -169,7 +195,14 @@ mod tests {
         let dir = temp_tree("cccc_walk_dup_roots");
         fs::write(dir.join("a.ts"), "").unwrap();
 
-        let files = collect_files(&[dir.clone(), dir.clone()], &ts_exts(), false, None, 8);
+        let files = collect_files(
+            &[dir.clone(), dir.clone()],
+            &ts_exts(),
+            false,
+            false,
+            None,
+            8,
+        );
         assert_eq!(sorted_names(&files), ["a.ts"]);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -182,7 +215,14 @@ mod tests {
         fs::write(dir.join("sub/b.ts"), "").unwrap();
 
         // `sub/b.ts` is reachable from both roots but must be counted once.
-        let files = collect_files(&[dir.clone(), dir.join("sub")], &ts_exts(), false, None, 8);
+        let files = collect_files(
+            &[dir.clone(), dir.join("sub")],
+            &ts_exts(),
+            false,
+            false,
+            None,
+            8,
+        );
         assert_eq!(sorted_names(&files), ["a.ts", "b.ts"]);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -192,7 +232,14 @@ mod tests {
         let dir = temp_tree("cccc_walk_file_and_root");
         fs::write(dir.join("a.ts"), "").unwrap();
 
-        let files = collect_files(&[dir.clone(), dir.join("a.ts")], &ts_exts(), false, None, 8);
+        let files = collect_files(
+            &[dir.clone(), dir.join("a.ts")],
+            &ts_exts(),
+            false,
+            false,
+            None,
+            8,
+        );
         assert_eq!(sorted_names(&files), ["a.ts"]);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -209,8 +256,33 @@ mod tests {
 
         // The same file is reachable under two different paths; canonicalization
         // must collapse them to one entry.
-        let files = collect_files(&[real, link], &ts_exts(), false, None, 8);
+        let files = collect_files(&[real, link], &ts_exts(), false, false, None, 8);
         assert_eq!(sorted_names(&files), ["a.ts"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extensionless_shebang_files_are_collected_only_when_enabled() {
+        let dir = temp_tree("cccc_walk_shebang");
+        fs::write(dir.join("deploy"), "#!/bin/bash\nfoo() { :; }\n").unwrap();
+        fs::write(dir.join("notes"), "just text, no shebang\n").unwrap();
+        fs::write(dir.join("a.ts"), "").unwrap();
+
+        // Off: only the extension match is collected.
+        let off = collect_files(
+            std::slice::from_ref(&dir),
+            &ts_exts(),
+            false,
+            false,
+            None,
+            8,
+        );
+        assert_eq!(sorted_names(&off), ["a.ts"]);
+
+        // On: the extensionless shebang script joins the extension match, and
+        // the shebang-less file is still left alone.
+        let on = collect_files(std::slice::from_ref(&dir), &ts_exts(), true, false, None, 8);
+        assert_eq!(sorted_names(&on), ["a.ts", "deploy"]);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -224,8 +296,22 @@ mod tests {
             }
         }
 
-        let one = collect_files(std::slice::from_ref(&dir), &ts_exts(), false, None, 1);
-        let many = collect_files(std::slice::from_ref(&dir), &ts_exts(), false, None, 8);
+        let one = collect_files(
+            std::slice::from_ref(&dir),
+            &ts_exts(),
+            false,
+            false,
+            None,
+            1,
+        );
+        let many = collect_files(
+            std::slice::from_ref(&dir),
+            &ts_exts(),
+            false,
+            false,
+            None,
+            8,
+        );
         let sort = |mut v: Vec<PathBuf>| {
             v.sort();
             v

@@ -351,7 +351,7 @@ fn analyzes_all_languages_in_one_run() {
     // The fixtures dir holds one file per language; a single run dispatches each
     // by extension and reports them all together.
     let v = json(&["tests/fixtures"]);
-    let expected_files = if cfg!(feature = "kotlin") { 19 } else { 18 };
+    let expected_files = if cfg!(feature = "kotlin") { 21 } else { 20 };
     assert_eq!(v["summary"]["file_count"], expected_files);
     let paths: Vec<String> = v["files"]
         .as_array()
@@ -378,6 +378,8 @@ fn analyzes_all_languages_in_one_run() {
         "sample.java",
         "sample.dart",
         "sample.scala",
+        "sample.sh",
+        "sample.zsh",
     ];
     if cfg!(feature = "kotlin") {
         samples.push("sample.kt");
@@ -401,6 +403,86 @@ fn lang_filter_accepts_aliases_and_multiple() {
     assert_eq!(v["summary"]["file_count"], 2);
 }
 
+// ----- shebang discovery for extensionless files -----------------------------
+
+/// Create a fresh temp dir for a shebang test (parallel tests must not share).
+fn shebang_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn extensionless_shebang_script_is_analyzed() {
+    let dir = shebang_dir("cccc_shebang_detect");
+    std::fs::write(
+        dir.join("deploy"),
+        "#!/usr/bin/env bash\nsum_of_primes() {\n  for i in 1 2; do :; done\n}\n",
+    )
+    .unwrap();
+    let v = json(&[dir.to_str().unwrap()]);
+    assert_eq!(v["summary"]["file_count"], 1);
+    assert_eq!(v["files"][0]["functions"][0]["name"], "sum_of_primes");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn extensionless_non_script_is_ignored() {
+    let dir = shebang_dir("cccc_shebang_ignore");
+    std::fs::write(dir.join("LICENSE"), "all rights reserved\n").unwrap();
+    // Nothing is collected, so cccc exits cleanly without emitting a report.
+    Command::cargo_bin("cccc")
+        .unwrap()
+        .arg(&dir)
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("no matching files"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn shebang_respects_lang_filter() {
+    let dir = shebang_dir("cccc_shebang_lang_filter");
+    std::fs::write(
+        dir.join("run"),
+        "#!/usr/bin/env python3\nif True:\n    pass\n",
+    )
+    .unwrap();
+    // A python shebang under `--lang shell` is collected but must not be
+    // analyzed as shell (nor as python, which is not active).
+    let v = json(&["--lang", "shell", dir.to_str().unwrap()]);
+    assert_eq!(v["summary"]["file_count"], 0);
+    // With python active, the same file is analyzed.
+    let v = json(&["--lang", "python", dir.to_str().unwrap()]);
+    assert_eq!(v["summary"]["file_count"], 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn explicit_global_ext_disables_shebang_discovery() {
+    let dir = shebang_dir("cccc_shebang_ext_off");
+    std::fs::write(dir.join("deploy"), "#!/usr/bin/env bash\necho hi\n").unwrap();
+    std::fs::write(dir.join("real.sh"), "echo hi\n").unwrap();
+    // `--ext sh` is an explicit filter: only the .sh file is collected.
+    let v = json(&["--ext", "sh", dir.to_str().unwrap()]);
+    assert_eq!(v["summary"]["file_count"], 1);
+    assert!(v["files"][0]["path"].as_str().unwrap().ends_with("real.sh"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn extension_wins_over_a_conflicting_shebang() {
+    let dir = shebang_dir("cccc_shebang_ext_wins");
+    // A `.sh` file carrying a python shebang is routed by the extension, so the
+    // shell parser sees `echo hi` cleanly; the python parser would not.
+    std::fs::write(dir.join("weird.sh"), "#!/usr/bin/env python3\necho hi\n").unwrap();
+    let v = json(&[dir.to_str().unwrap()]);
+    assert_eq!(v["summary"]["file_count"], 1);
+    assert_eq!(v["summary"]["parse_error_count"], 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn unknown_lang_is_an_error() {
     Command::cargo_bin("cccc")
@@ -416,7 +498,7 @@ fn unknown_lang_is_an_error() {
 fn exclude_lang_drops_a_language() {
     // Excluding every language except ES and Rust leaves the .ts and .rs fixtures.
     let excluded = format!(
-        "go,php,ruby,scheme,commonlisp,emacslisp,clojure{KOTLIN},python,perl,zig,c,cpp,swift,java,dart,scala"
+        "go,php,ruby,scheme,commonlisp,emacslisp,clojure{KOTLIN},python,perl,zig,c,cpp,swift,java,dart,scala,shell,zsh"
     );
     let v = json(&["--exclude-lang", &excluded, "tests/fixtures"]);
     let mut exts: Vec<String> = v["files"]
@@ -463,7 +545,7 @@ fn excluding_every_language_is_an_error() {
         .args([
             "--exclude-lang",
             &format!(
-                "es,rust,go,php,ruby,scheme,commonlisp,emacslisp,clojure{KOTLIN},python,perl,zig,c,cpp,swift,java,dart,scala"
+                "es,rust,go,php,ruby,scheme,commonlisp,emacslisp,clojure{KOTLIN},python,perl,zig,c,cpp,swift,java,dart,scala,shell,zsh"
             ),
             "tests/fixtures",
         ])

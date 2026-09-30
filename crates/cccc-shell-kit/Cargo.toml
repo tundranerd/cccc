@@ -1,0 +1,13 @@
+[package]
+name = "cccc-shell-kit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Shared lowering for the shell-family cccc adapters (sh/bash and zsh)"
+
+[dependencies]
+cccc-core = { workspace = true }
+tree-sitter = "0.27"

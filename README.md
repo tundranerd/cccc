@@ -58,6 +58,13 @@
   - **Scala** (`--lang scala`), via the official
     [tree-sitter-scala](https://github.com/tree-sitter/tree-sitter-scala)
     grammar. Analyzes `.scala`, `.sc`.
+  - **Shell** (`--lang shell`, aliases `sh`/`bash`/`posix`/`ksh`), POSIX `sh`
+    and `bash`, via the official
+    [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash)
+    grammar. Analyzes `.sh`, `.bash`, `.bats`, `.ksh`, `.command`.
+  - **Zsh** (`--lang zsh`), via the
+    [georgeharker/tree-sitter-zsh](https://github.com/georgeharker/tree-sitter-zsh)
+    grammar. Analyzes `.zsh`.
 - A Rust library for calculating cognitive and cyclomatic complexity in a language-agnostic way
 
 ## Workspace layout
@@ -90,6 +97,9 @@ library and extended to other languages:
 | [`cccc-java`](crates/cccc-java) | Java adapter **library**: lowers the official [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) CST into `cccc-core`'s IR. Depends only on `cccc-core` + tree-sitter + the Java grammar — **no CLI dependencies**. Like `cccc-kt`/`cccc-py`, the grammar's C source is compiled by `cc`, so building needs a C compiler (no libclang). |
 | [`cccc-dart`](crates/cccc-dart) | Dart adapter **library**: lowers the [nielsenko/tree-sitter-dart](https://github.com/nielsenko/tree-sitter-dart) CST into `cccc-core`'s IR. Depends only on `cccc-core` + tree-sitter + the Dart grammar — **no CLI dependencies**. The grammar's C source is compiled by `cc`, so building needs a C compiler (no libclang). |
 | [`cccc-scala`](crates/cccc-scala) | Scala adapter **library**: lowers the official [tree-sitter-scala](https://github.com/tree-sitter/tree-sitter-scala) CST into `cccc-core`'s IR. Depends only on `cccc-core` + tree-sitter + the Scala grammar — **no CLI dependencies**. Like `cccc-kt`/`cccc-py`, the grammar's C source is compiled by `cc`, so building needs a C compiler (no libclang). |
+| [`cccc-sh`](crates/cccc-sh) | Shell (POSIX `sh` / `bash`) adapter **library**: lowers the official [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) CST into `cccc-core`'s IR. Depends only on `cccc-core` + tree-sitter + the Bash grammar — **no CLI dependencies**. Like `cccc-kt`/`cccc-py`, the grammar's C source is compiled by `cc`, so building needs a C compiler (no libclang). |
+| [`cccc-shell-kit`](crates/cccc-shell-kit) | Shared **lowering** for the shell-family adapters: `tree-sitter-zsh` is a reworking of the bash grammar whose control-flow skeleton is nearly identical, so `cccc-sh` and `cccc-zsh` both drive one `cccc_shell_kit::SharedBuilder` (the few zsh-only arms are gated on the dialect). Depends only on `cccc-core` + tree-sitter — no grammar crate, no CLI dependencies. |
+| [`cccc-zsh`](crates/cccc-zsh) | Zsh adapter **library**: lowers the [georgeharker/tree-sitter-zsh](https://github.com/georgeharker/tree-sitter-zsh) CST into `cccc-core`'s IR via `cccc-shell-kit`. Depends only on `cccc-core` + `cccc-shell-kit` + tree-sitter + the zsh grammar — **no CLI dependencies**. Like `cccc-kt`/`cccc-py`, the grammar's C source is compiled by `cc`, so building needs a C compiler (no libclang). |
 
 Each adapter is a standalone library so that a consumer who only wants the
 metrics pulls in just that adapter (+ `cccc-core` + its parser), never clap /
@@ -102,10 +112,11 @@ it with one entry in `cccc-cli`'s `lang::LANGUAGES` (and add the dependency) —
 no new binary, and no reimplementing the metrics or the CLI. `cccc-es` (oxc),
 `cccc-rs` (syn), `cccc-go` (gosyn), `cccc-php` (php-rs-parser), `cccc-rb`
 (ruby-prism), `cccc-kt` / `cccc-py` / `cccc-pl` (tree-sitter), `cccc-swift` (tree-sitter), `cccc-c` / `cccc-cpp` (tree-sitter),
-`cccc-java` (tree-sitter), `cccc-dart` (tree-sitter), `cccc-scala` (tree-sitter), `cccc-scheme` (lispexp), `cccc-clojure` (lispexp), `cccc-lisp` (lispexp, Common Lisp / Emacs Lisp / …),
+`cccc-java` (tree-sitter), `cccc-dart` (tree-sitter), `cccc-scala` (tree-sitter), `cccc-sh` / `cccc-zsh` (tree-sitter), `cccc-scheme` (lispexp), `cccc-clojure` (lispexp), `cccc-lisp` (lispexp, Common Lisp / Emacs Lisp / …),
 and `cccc-zig` (zigsyn) are the reference adapters: same shape, different parser.
 The Lisp-family adapters share their lowering skeleton via `cccc-lisp-kit`;
-`cccc-c` and `cccc-cpp` share theirs via `cccc-clike`.
+`cccc-c` and `cccc-cpp` share theirs via `cccc-clike`; and `cccc-sh` and
+`cccc-zsh` share theirs via `cccc-shell-kit`.
 
 **See [docs/ADDING_A_LANGUAGE.md](docs/ADDING_A_LANGUAGE.md) for the full
 step-by-step guide**, including the IR-node reference table, the
@@ -156,6 +167,16 @@ directories are walked recursively (respecting `.gitignore`, always skipping
 `node_modules`). Each file is dispatched to the right front-end by its
 extension, so a directory mixing `.ts`, `.rs`, `.go`, and `.php` is analyzed in
 a single run. Restrict the languages with `--lang` (e.g. `--lang go,rust`).
+
+A file with **no extension** is recognized by its `#!` interpreter line (a
+shebang), so `bin/deploy` starting with `#!/usr/bin/env bash` is analyzed just
+like `deploy.sh`. Detection is deliberately independent of the executable bit:
+non-executable scripts (sourced, or invoked via an interpreter) count too, and
+the mode is meaningless on Windows. An explicit extension always wins over the
+shebang, and an explicit `--ext` filter disables shebang discovery (the
+extension set was chosen deliberately). A `zsh` shebang routes to the `zsh`
+adapter; `sh`/`bash`/`dash`/`ksh` route to the shell adapter. A file whose
+shebang names no bundled language is skipped.
 
 Output is **JSON by default** — compact, on one line, ready to pipe into `jq`
 or an artifact store; `--pretty` prints the same document indented.
@@ -710,3 +731,62 @@ its language onto the same IR, with the per-language differences below.
   `scala.util.control.Breaks` (`breakable {}` / `break()`) and Scala 3's
   `scala.util.boundary` — are ordinary method calls, so they are not treated
   as jumps and add nothing to the score.
+
+### Shell (`--lang shell`)
+
+POSIX `sh` and `bash` (the first-party `tree-sitter-bash` grammar). `.sh`,
+`.bash`, `.bats`, `.ksh`, and `.command` are analyzed. `zsh` has its own adapter
+(`cccc-zsh`) — the bash grammar cannot parse zsh-only syntax.
+
+- **Function-like units:** every `function_definition` — `foo() { … }`,
+  `function foo { … }`, and `function foo() { … }` all become a `function` unit
+  named from the definition. Shell functions nest, so a function defined inside
+  another is its own unit and does not inflate the enclosing function's score.
+- **Maps to the shared nodes:** `if`/`elif`/`else` (the grammar does not field
+  the `then` boundary, so the split is found at the `then` keyword); `for`,
+  `select`, `while`, `until`, and C-style `for (( … ))` (the
+  condition/initializer/update score inside the loop, as in the other
+  adapters); `case` (each arm is a `case_item`; a catch-all `*)` arm is the
+  non-decision default); the arithmetic ternary `?:` inside `(( … ))`; and
+  `&&`/`||` runs.
+- **Logical folding:** a run of like operators is one node. This covers shell
+  `list` nodes (`a && b && c`), `&&`/`||` inside `[[ … ]]` and `(( … ))`, and
+  POSIX `[ a -a b -o c ]` (`-a`/`-o` in a `binary_expression` are the logical
+  operators; a unary `-a` is file-existence and does not count).
+- **Jumps:** `break N` / `continue N` with `N > 1` scores like a labelled jump
+  (one flat cognitive point, no nesting bonus); plain `break` / `continue` /
+  `return` score nothing. `! cmd` (`negated_command`) adds nothing.
+- **Transparent:** subshells, brace groups, pipelines, command substitutions,
+  process substitutions, redirections, variable assignments, and heredocs.
+  The body of a heredoc is data, but a `command_substitution` inside it is
+  still reached. Shell has no exception construct, so `trap` is an ordinary
+  command.
+- **Recursion** is detected by simple command name, so a function called via
+  its own name (`fib …` or inside `$(fib …)`) adds one cognitive point per
+  call.
+- **Discovery is extension-based, with shebang detection for extensionless
+  files** (see [Usage](#usage)): `bin/deploy` with `#!/bin/sh` is analyzed like
+  `deploy.sh`; a `zsh` shebang routes to the `zsh` adapter instead.
+
+### Zsh (`--lang zsh`)
+
+`zsh` (the community `georgeharker/tree-sitter-zsh` grammar, a reworking of the
+bash grammar). `.zsh` files are analyzed. The control-flow skeleton is shared
+with the shell adapter via `cccc-shell-kit`; zsh-only constructs are handled on
+top of it:
+
+- **Maps to the shared nodes:** the same `if`/`elif`/`else`, `case` (including
+  zsh's `;|` fallthrough), `&&`/`||`, recursion, and `break N`/`continue N`
+  handling as [Shell](#shell---lang-shell).
+- **zsh-only loops:** `repeat n do … done` (and the `repeat n cmd` short form),
+  the terse `for x (a b c) …`, and a standalone `select … do … done` all map to
+  `Node::Loop`.
+- **Transparent:** `{ … } always { … }` (an `always` block is a `finally`, so it
+  is not a decision point), `coproc`, and anonymous `() { … }` functions
+  (reported as `<function>`, with no recursion name).
+- **Known grammar limitation:** the braceless short forms
+  `if [[ … ]] { … }` / `while … { … }` have no rule in this grammar, so they
+  surface as parse errors (reported in the summary); the `then … fi` form is
+  required. As a less battle-tested grammar than `tree-sitter-bash`, advanced
+  zsh (parameter-expansion flags, glob qualifiers) may also produce parse
+  errors — these are surfaced, never fatal.

@@ -243,8 +243,10 @@ dependencies = [
  "cccc-rs",
  "cccc-scala",
  "cccc-scheme",
+ "cccc-sh",
  "cccc-swift",
  "cccc-zig",
+ "cccc-zsh",
  "clap",
  "globset",
  "ignore",
@@ -414,6 +416,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cccc-sh"
+version = "1.7.0"
+dependencies = [
+ "cccc-core",
+ "cccc-shell-kit",
+ "tree-sitter",
+ "tree-sitter-bash",
+]
+
+[[package]]
+name = "cccc-shell-kit"
+version = "1.7.0"
+dependencies = [
+ "cccc-core",
+ "tree-sitter",
+]
+
+[[package]]
 name = "cccc-swift"
 version = "1.7.0"
 dependencies = [
@@ -428,6 +448,16 @@ version = "1.7.0"
 dependencies = [
  "cccc-core",
  "zigsyn",
+]
+
+[[package]]
+name = "cccc-zsh"
+version = "1.7.0"
+dependencies = [
+ "cccc-core",
+ "cccc-shell-kit",
+ "tree-sitter",
+ "tree-sitter-zsh",
 ]
 
 [[package]]
@@ -1605,6 +1635,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-bash"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e5ec769279cc91b561d3df0d8a5deb26b0ad40d183127f409494d6d8fc53062"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-c"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1684,6 +1724,16 @@ name = "tree-sitter-swift"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe36052155b9dd69ca82b3b8f1b4ccfb2d867125ac1a4db1dd7331829242668c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-zsh"
+version = "0.63.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "907f7ea76070507d7a6b054b38f1475caa7db085437911352ca0f361f08f142e"
 dependencies = [
  "cc",
  "tree-sitter-language",

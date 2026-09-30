@@ -149,7 +149,111 @@ pub const LANGUAGES: &[Language] = &[
         exts: cccc_scala::DEFAULT_EXTS,
         analyze: cccc_scala::analyze_source,
     },
+    Language {
+        name: "shell",
+        aliases: &["sh", "bash", "posix", "ksh"],
+        exts: cccc_sh::DEFAULT_EXTS,
+        analyze: cccc_sh::analyze_source,
+    },
+    Language {
+        name: "zsh",
+        aliases: &[],
+        exts: cccc_zsh::DEFAULT_EXTS,
+        analyze: cccc_zsh::analyze_source,
+    },
 ];
+
+/// Interpreter names found in a `#!` line, mapped to the canonical language
+/// that analyzes them. Version suffixes are stripped before lookup
+/// (`python3.11` → `python`) and `env` is unwrapped, so one entry covers the
+/// common spellings. Only languages a bundled adapter handles appear here; an
+/// interpreter with no entry means the file is not analyzed by its shebang.
+const SHEBANG_INTERPRETERS: &[(&str, &str)] = &[
+    // POSIX shell and its dialects. `zsh` is its own adapter (the bash
+    // grammar cannot parse zsh-only syntax).
+    ("sh", "shell"),
+    ("bash", "shell"),
+    ("dash", "shell"),
+    ("ash", "shell"),
+    ("ksh", "shell"),
+    ("mksh", "shell"),
+    ("zsh", "zsh"),
+    ("python", "python"),
+    ("ruby", "ruby"),
+    ("perl", "perl"),
+    ("php", "php"),
+    ("node", "es"),
+    ("nodejs", "es"),
+    ("deno", "es"),
+    ("bun", "es"),
+    ("ts-node", "es"),
+    ("tsx", "es"),
+    ("guile", "scheme"),
+    ("racket", "scheme"),
+    ("chibi-scheme", "scheme"),
+    ("csi", "scheme"),
+    ("gosh", "scheme"),
+    ("sbcl", "commonlisp"),
+    ("clisp", "commonlisp"),
+    ("ecl", "commonlisp"),
+    ("ccl", "commonlisp"),
+    ("clojure", "clojure"),
+    ("bb", "clojure"),
+    ("rust-script", "rust"),
+    ("swift", "swift"),
+    ("dart", "dart"),
+    ("scala", "scala"),
+    ("scala-cli", "scala"),
+    ("amm", "scala"),
+    ("emacs", "emacslisp"),
+    ("kotlin", "kotlin"),
+];
+
+/// The canonical language name that handles the `#!` line `first_line`, if a
+/// bundled language does. `first_line` must be the file's first line.
+///
+/// The lookup deliberately does **not** consult the executable bit: scripts are
+/// routinely stored non-executable (invoked as `bash foo`, sourced, or checked
+/// out on a filesystem without the mode), and the bit is meaningless on
+/// Windows. A `#!` at byte 0 is the portable signal that a file is a script.
+/// The extension, when present, always wins over the shebang — this is only the
+/// fallback for files no extension claims.
+pub fn language_from_shebang(first_line: &str) -> Option<&'static str> {
+    let interpreter = interpreter_of(first_line)?;
+    let canonical = SHEBANG_INTERPRETERS
+        .iter()
+        .find(|(interp, _)| *interp == interpreter)
+        .map(|(_, lang)| *lang)?;
+    // Only return languages actually compiled in (e.g. Kotlin is optional).
+    LANGUAGES
+        .iter()
+        .find(|l| l.name == canonical)
+        .map(|l| l.name)
+}
+
+/// Extract and normalize the interpreter from a `#!` line: unwrap `env`, take
+/// the program's basename, and drop a trailing version (`python3.11` →
+/// `python`). Returns `None` when the line is not a shebang or names nothing.
+fn interpreter_of(first_line: &str) -> Option<&str> {
+    let rest = first_line.strip_prefix("#!")?.trim();
+    let mut tokens = rest.split_whitespace();
+    let program = tokens.next()?;
+    let mut base = basename(program);
+    if base == "env" {
+        // `env` may carry flags (`-S`) and VAR=VALUE assignments first.
+        base = tokens
+            .find(|t| !t.starts_with('-') && !t.contains('='))
+            .map(basename)?;
+    }
+    let stem = base.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    Some(if stem.is_empty() { base } else { stem })
+}
+
+/// The final path component of `program` (`/usr/bin/python3` → `python3`), or
+/// the whole string when it has no `/`.
+fn basename(program: &str) -> &str {
+    program.rsplit('/').next().unwrap_or(program)
+}
 
 /// Resolve the active languages from an `include` (`--lang`) and an `exclude`
 /// (`--exclude-lang`) filter.
@@ -317,6 +421,8 @@ mod tests {
                 "java".to_string(),
                 "dart".to_string(),
                 "scala".to_string(),
+                "shell".to_string(),
+                "zsh".to_string(),
             ]),
         )
         .unwrap();
@@ -356,7 +462,8 @@ mod tests {
         let map = build_dispatch(&all, &BTreeMap::new());
         let mut keys = vec![
             "ts", "rs", "go", "php", "rb", "scm", "lisp", "el", "clj", "py", "pyi", "zig", "c",
-            "h", "pl", "pm", "t", "swift", "java", "dart", "scala", "sc",
+            "h", "pl", "pm", "t", "swift", "java", "dart", "scala", "sc", "sh", "bash", "bats",
+            "ksh", "command", "zsh",
         ];
         if cfg!(feature = "kotlin") {
             keys.extend(["kt", "kts"]);
@@ -399,5 +506,39 @@ mod tests {
     #[test]
     fn require_canonical_rejects_unknown() {
         assert!(require_canonical("cobol", "--ext").is_err());
+    }
+
+    #[test]
+    fn shebang_detection_normalizes_common_forms() {
+        assert_eq!(language_from_shebang("#!/bin/bash"), Some("shell"));
+        assert_eq!(language_from_shebang("#!/bin/sh -e"), Some("shell"));
+        assert_eq!(language_from_shebang("#!/usr/bin/env bash"), Some("shell"));
+        assert_eq!(
+            language_from_shebang("#!/usr/bin/env -S zsh -eu"),
+            Some("zsh")
+        );
+        assert_eq!(
+            language_from_shebang("#!/usr/bin/python3.11"),
+            Some("python")
+        );
+        assert_eq!(
+            language_from_shebang("#!/usr/bin/env python"),
+            Some("python")
+        );
+        assert_eq!(
+            language_from_shebang("#!/usr/bin/env VAR=1 python3"),
+            Some("python")
+        );
+        assert_eq!(language_from_shebang("#!/usr/bin/env node"), Some("es"));
+        assert_eq!(language_from_shebang("#!/usr/bin/env ruby"), Some("ruby"));
+        assert_eq!(language_from_shebang("#!/usr/bin/perl"), Some("perl"));
+    }
+
+    #[test]
+    fn shebang_detection_rejects_non_scripts() {
+        assert_eq!(language_from_shebang("#!/usr/bin/env cobol"), None);
+        assert_eq!(language_from_shebang("#!/bin/cat"), None);
+        assert_eq!(language_from_shebang("no shebang here"), None);
+        assert_eq!(language_from_shebang("#!/usr/bin/env"), None);
     }
 }
